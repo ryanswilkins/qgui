@@ -40,14 +40,12 @@ class CreatePrmLib(Toplevel):
 
         self.atomi_changed = StringVar()
         self.atomj_changed = StringVar()
-        self.prm_id_var = StringVar()
 
         #Replace original pdb entry
         self.check_replace = IntVar()
         self.check_replace.set(1)
 
         self.dialog_window()
-        self.prm_id_var.set('T')
 
         self.atomi_changed.trace('w', self.update_atomnr)
         self.atomj_changed.trace('w', self.update_atomnr)
@@ -321,10 +319,10 @@ class CreatePrmLib(Toplevel):
             if 'exception' in line:
                 done = True
                 self.impact_failed = True
-            #if 'FATAL' in line:
-                #030420: The call function returns a FATAL at the end... nuking this for now. GVI
-            #    self.impact_failed = True
-            #    done = True
+            #ffld_server always prints a FATAL at the end, so only a FATAL before type assignment is a failure:
+            if 'FATAL' in line and not done:
+                self.impact_failed = True
+                done = True
 
         if not done:
             #Wait for ffld_server to finish if not done:
@@ -435,7 +433,13 @@ class CreatePrmLib(Toplevel):
                 if len(log[i].split()) > 6:
                     orgName = lig[lig_line][13:17].strip()
                     newName = log[i].split()[0]
-                    prmName = log[i].split()[3]           #Create unique parameter names for .prm
+                    #Unique parameter name per atom for .prm, as in qtools: resname.ATOMNAME (e.g. chm.C3).
+                    #Do not use the OPLS bond type (column 3): it is shared by chemically different atoms,
+                    #so bonds/angles/torsions between atoms of the same classes would silently get the
+                    #parameters of the first one written.
+                    prmName = '%s.%s' % (self.resname.get().strip().lower(), orgName)
+                    if prmName in list(self.prmDict.values()):
+                        prmName = '%s_%d' % (prmName, lig_line + 1)
                     self.ligDict[newName] = orgName
                     self.prmDict[newName] = prmName
                     lig_line += 1
@@ -500,7 +504,7 @@ class CreatePrmLib(Toplevel):
             atoms += 1
             atomname = ligDict[self.log[i].split()[0]]
             atomnames.append(atomname)
-            prmname = self.prm_id.get() + prmDict[self.log[i].split()[0]]
+            prmname = prmDict[self.log[i].split()[0]]
             prmnames.append(prmname)
             charge = self.log[i].split()[4]
             charges.append(charge)
@@ -589,7 +593,7 @@ class CreatePrmLib(Toplevel):
 
         prmDict = self.ligprmDict(self.impact_log, self.lig_pdb)[1]
         for i in range(self.nbndStart + 1, self.nbndEnd + 1):
-            prmname = self.prm_id.get() + prmDict[self.log[i].split()[0]]
+            prmname = prmDict[self.log[i].split()[0]]
             if prmname not in prm_added:
                 prm_added.append(prmname)
                 sigma = float(self.log[i].split()[5])
@@ -618,8 +622,8 @@ class CreatePrmLib(Toplevel):
         bnd_added = []
 
         for i in range(self.bndStart, self.bndEnd + 1):
-            atom1 = self.prm_id.get() + prmDict[self.log[i].split()[0]]
-            atom2 = self.prm_id.get() + prmDict[self.log[i].split()[1]]
+            atom1 = prmDict[self.log[i].split()[0]]
+            atom2 = prmDict[self.log[i].split()[1]]
             if [atom1, atom2] not in bnd_added and [atom2, atom1] not in bnd_added:
                 bnd_added.append([atom1, atom2])
                 bnd_added.append([atom2, atom1])
@@ -649,9 +653,9 @@ class CreatePrmLib(Toplevel):
         ang_added = []
 
         for i in range(self.angStart, self.angEnd + 1):
-            atom1 = self.prm_id.get() + prmDict[self.log[i].split()[0]]
-            atom2 = self.prm_id.get() +  prmDict[self.log[i].split()[1]]
-            atom3 = self.prm_id.get() + prmDict[self.log[i].split()[2]]
+            atom1 = prmDict[self.log[i].split()[0]]
+            atom2 = prmDict[self.log[i].split()[1]]
+            atom3 = prmDict[self.log[i].split()[2]]
             if [atom1, atom2, atom3] not in ang_added and [atom3, atom2, atom1] not in ang_added:
                 ang_added.append([atom1, atom2, atom3])
                 ang_added.append([atom3, atom2, atom1])
@@ -682,10 +686,10 @@ class CreatePrmLib(Toplevel):
         tor_added = []
         for i in range(self.torStart, self.torEnd + 1):
             try:
-                atom1 = self.prm_id.get() + prmDict[self.log[i].split()[0]]
-                atom2 = self.prm_id.get() + prmDict[self.log[i].split()[1]]
-                atom3 = self.prm_id.get() + prmDict[self.log[i].split()[2]]
-                atom4 = self.prm_id.get() + prmDict[self.log[i].split()[3]]
+                atom1 = prmDict[self.log[i].split()[0]]
+                atom2 = prmDict[self.log[i].split()[1]]
+                atom3 = prmDict[self.log[i].split()[2]]
+                atom4 = prmDict[self.log[i].split()[3]]
                 if [atom1, atom2, atom3, atom4] not in tor_added and [atom4, atom3, atom2, atom1] not in tor_added:
                     tor_added.append([atom1, atom2, atom3, atom4])
                     tor_added.append([atom4, atom3, atom2, atom1])
@@ -758,10 +762,10 @@ class CreatePrmLib(Toplevel):
 
                 qimp1, qimp2, qimp3, qimp4 = self.impQ(atom1, atom2, atom3, atom4)
 
-                qimp1 = self.prm_id.get() + prmDict[qimp1]
-                qimp2 = self.prm_id.get() + prmDict[qimp2]
-                qimp3 = self.prm_id.get() + prmDict[qimp3]
-                qimp4 = self.prm_id.get() + prmDict[qimp4]
+                qimp1 = prmDict[qimp1]
+                qimp2 = prmDict[qimp2]
+                qimp3 = prmDict[qimp3]
+                qimp4 = prmDict[qimp4]
                 if [qimp1, qimp2, qimp3, qimp4] not in imp_added and [qimp1, qimp2, qimp4, qimp3] not in imp_added:
                     imp_added.append([qimp1, qimp2, qimp3, qimp4])
                     imp_added.append([qimp1, qimp2, qimp4, qimp3])
@@ -891,6 +895,13 @@ class CreatePrmLib(Toplevel):
 
         self.getParam()
         if not self.impact_failed:
+            #Q reads atom type names into 8 characters; longer names are truncated and can collide.
+            prmDict = self.ligprmDict(self.impact_log, self.lig_pdb)[1]
+            too_long = [name for name in list(prmDict.values()) if len(name) > 8]
+            if too_long:
+                self.app.errorBox('Error', 'Atom type names longer than 8 characters (Q limit): %s\n'
+                                           'Use a shorter residue name or shorter atom names.' % ', '.join(too_long))
+                return
             self.makeLib(self.app.workdir + '/.tmpfile')
             self.makeVdw(self.app.workdir + '/.tmpfile')
             if self.bndStart:
@@ -976,16 +987,6 @@ class CreatePrmLib(Toplevel):
 
         self.atomnr = Entry(frame2, width=6, highlightthickness=0, relief=GROOVE)
         self.atomnr.grid(row=5, column=3)
-
-        prmname = Label(frame2, text = 'Parameter id.:', bg=self.main_color)
-        prmname.grid(row=6, column=0, columnspan=3, sticky='w')
-
-        self.prm_id = Spinbox(frame2, width = 4, highlightthickness=0, relief=GROOVE,
-                              values=('A','B','C','D','E','F','G','H','I',
-                                                         'J','K','L','M','N','O','P','Q','R',
-                                                         'S','T','U','V','W','X','Y','Z'),
-                              textvariable=self.prm_id_var)
-        self.prm_id.grid(row=6, column=3)
 
         forcefield = Label(frame2, text='Force field:', bg=self.main_color)
         forcefield.grid(row=3, rowspan=3, column=5, columnspan=1)

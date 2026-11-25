@@ -4129,6 +4129,9 @@ class SetupEVB(Toplevel):
         ############################################################################
         #Now assuming that the pymol structure is verified by user and ok this round:
         elif self.qevb_temp_checked:
+            self.auto_type_names = self.get_auto_type_names()
+            if not self.auto_type_names:
+                return
             for state in range(1, self.evb_states.get() + 1):
                 self.session.stdin.write('save qevb_org%d.pdb, state%d_auto\n' % (state, state))
 
@@ -4204,12 +4207,14 @@ class SetupEVB(Toplevel):
                     return
 
             #Bring back original pymol structures again and get parameters
+            self.auto_atomtypes = list()
             for state in range(1, self.evb_states.get() + 1):
                 self.session.stdin.write('enable state%d\n' % state)
                 self.session.stdin.write('delete state%d_auto\n' % state)
                 print('Now I will get parameters!')
                 self.get_auto_prm(cord_q_state[state - 1], '%s/qevb_tmp%d.pdb' % (self.app.workdir, state),
                                    '%s/prm_tmp%d.out' % (self.app.workdir, state), state - 1)
+            self.merge_auto_atomtypes()
 
             self.update_all()
             self.app.log('info','Parameter assignment for %d EVB states completed.' % self.evb_states.get())
@@ -4376,8 +4381,8 @@ class SetupEVB(Toplevel):
                             if atom3 in list(newname_q.keys()) and atom4 in list(newname_q.keys()):
                                 quart = '%s %s %s %s' % (newname_atomtype[atom1], newname_atomtype[atom2],
                                                          newname_atomtype[atom3], newname_atomtype[atom4])
-                                quart_rev = '%s %s %s %s' % (newname_atomtype[atom1], newname_atomtype[atom2],
-                                                             newname_atomtype[atom4], newname_atomtype[atom3])
+                                quart_rev = '%s %s %s %s' % (newname_atomtype[atom4], newname_atomtype[atom3],
+                                                             newname_atomtype[atom2], newname_atomtype[atom1])
                                 self.torsion_prm[quart] = [[k1, 0.0, 1], [k2, 180.0, 1], [k3, 0.0, 1]]
                                 self.torsion_prm[quart_rev] = [[k1, 0.0, 1], [k2, 180.0, 1], [k3, 0.0, 1]]
 
@@ -4422,8 +4427,6 @@ class SetupEVB(Toplevel):
                         found_vdw = False
                     else:
                         newname = line.split()[0]
-                        atomtype = 'Q'+line.split()[3]
-
                         charge = float(line.split()[4])
                         sigma = float(line.split()[5])
                         epsilon = float(line.split()[6])
@@ -4434,8 +4437,14 @@ class SetupEVB(Toplevel):
                             ci = 7.0
                         mass = massDict[newname[0]]
                         if cord[type_nr] in list(cord_q.keys()):
-                            newname_atomtype[newname] = atomtype
                             q = cord_q[cord[type_nr]]
+                            #Unique atom type per Q-atom and state (resname.ATOMNAME). The OPLS bond type
+                            #(column 3) is shared by chemically different atoms, and bond/angle/torsion
+                            #parameters are keyed by type, so a shared type lets one bond overwrite another
+                            #(e.g. C-C single by C=C). Identical types are merged afterwards in merge_auto_atomtypes.
+                            atomtype = self.auto_type_names[q][state]
+                            self.auto_atomtypes.append(atomtype)
+                            newname_atomtype[newname] = atomtype
                             newname_q[newname] = q
                             self.atomtype_prm[atomtype] = [ri, ei, ci, ai, ri1_4, ei_1_4, mass]
                             self.q_atomtypes[q][state] = atomtype
@@ -4461,6 +4470,95 @@ class SetupEVB(Toplevel):
                     found_improper = True
 
         print('Ok, I am leaving parameters run')
+
+    def get_auto_type_names(self):
+        """
+        Atom type names for Auto assign, as in qtools: <state residue name>.<Q-atom name> (e.g. abc.C1 and
+        xyz.C1). Q-atoms with the same name (from different residues) get <residue name>.Q<nr>.
+        Returns {q: [type state1, type state2, ...]}, or None (with an error box) if names are not usable.
+        """
+        states = self.evb_states.get()
+        resnames = [self.state_resname[state].get().strip().lower() for state in range(states)]
+        if '' in resnames or len(set(resnames)) < states:
+            self.app.errorBox('Error', 'Auto assign needs a different residue name for each EVB state.')
+            return None
+
+        type_names = dict()
+        for q in sorted(self.q_atom_name.keys()):
+            type_names[q] = list()
+        too_long = list()
+        for state in range(states):
+            used = list()
+            for q in sorted(self.q_atom_name.keys()):
+                atomtype = '%s.%s' % (resnames[state], self.q_atom_name[q])
+                if atomtype in used:
+                    atomtype = '%s.Q%d' % (resnames[state], q)
+                used.append(atomtype)
+                #Q reads atom type names into 8 characters; longer names are truncated and can collide.
+                if len(atomtype) > 8:
+                    too_long.append(atomtype)
+                type_names[q].append(atomtype)
+
+        if too_long:
+            self.app.errorBox('Error', 'Atom type names longer than 8 characters (Q limit): %s\n'
+                                       'Use shorter residue names for the EVB states.' % ', '.join(too_long))
+            return None
+
+        return type_names
+
+    def merge_auto_atomtypes(self):
+        """
+        get_auto_prm gives each Q-atom its own atom type in every state. Where an atom has the same type
+        parameters in a later state as in an earlier one, reuse the earlier type so that only atoms that
+        really change are listed as changing. A merge is skipped if it would make a bond, angle, torsion or
+        improper key point to different parameters in different states.
+        ==> updates self.q_atomtypes, self.atomtype_prm, self.bond_prm, self.angle_prm,
+            self.torsion_prm, self.improper_prm
+        """
+        prm_dicts = [self.bond_prm, self.angle_prm, self.torsion_prm, self.improper_prm]
+
+        for q in sorted(self.q_atomtypes.keys()):
+            for state in range(1, self.evb_states.get()):
+                new_type = self.q_atomtypes[q][state]
+                if new_type not in self.auto_atomtypes:
+                    continue
+                for prev in range(state):
+                    old_type = self.q_atomtypes[q][prev]
+                    if old_type not in self.auto_atomtypes:
+                        continue
+                    if self.atomtype_prm[old_type] != self.atomtype_prm[new_type]:
+                        continue
+
+                    #Rename new_type --> old_type in all parameter keys and check for conflicts:
+                    renamed = [dict() for d in prm_dicts]
+                    conflict = False
+                    for i in range(len(prm_dicts)):
+                        for key in list(prm_dicts[i].keys()):
+                            types = key.split()
+                            if new_type not in types:
+                                continue
+                            new_key = ' '.join([old_type if t == new_type else t for t in types])
+                            value = prm_dicts[i][key]
+                            if new_key in prm_dicts[i] and prm_dicts[i][new_key] != value:
+                                conflict = True
+                            elif new_key in renamed[i] and renamed[i][new_key] != value:
+                                conflict = True
+                            if conflict:
+                                break
+                            renamed[i][new_key] = value
+                        if conflict:
+                            break
+                    if conflict:
+                        continue
+
+                    for i in range(len(prm_dicts)):
+                        for key in list(prm_dicts[i].keys()):
+                            if new_type in key.split():
+                                del prm_dicts[i][key]
+                        prm_dicts[i].update(renamed[i])
+                    del self.atomtype_prm[new_type]
+                    self.q_atomtypes[q][state] = old_type
+                    break
 
     def calcNBpar(self, sigma = 0, epsilon = 0):
         """
@@ -4559,10 +4657,10 @@ class SetupEVB(Toplevel):
             if 'exception' in line:
                 done = True
                 ffld_failed = True
-            #if 'FATAL' in line:
-                # 030420: The call function returns a FATAL at the end... nuking this for now. GVI
-            #    ffld_failed = True
-            #   done = True
+            #ffld_server always prints a FATAL at the end, so only a FATAL before type assignment is a failure:
+            if 'FATAL' in line and not done:
+                ffld_failed = True
+                done = True
 
         if not done:
             #Wait for ffld_server to finish if not done:
@@ -4574,7 +4672,7 @@ class SetupEVB(Toplevel):
         dotcount = 1
         count = 0
         while not done:
-            job_id = open(self.app.workdir + '/.tmpfile','r').readlines()
+            job_id = open(tmpname, 'r').readlines()
             for line in job_id:
                 if 'OPLSAA FORCE FIELD TYPE ASSIGNED' in line:
                     done = True
@@ -5632,6 +5730,22 @@ class SetupEVB(Toplevel):
         self.force_field.grid(in_=setup_label, row=3, column=2)
         #self.force_field.config(font=tkinter.font.Font(family="Courier", size=10))
         self.force_field.config(state=DISABLED)
+
+        #Residue name per state for Auto assign atom types (resname.ATOMNAME, as in qtools):
+        state_res_label = Label(frame2, text='Auto res. \N{GREEK SMALL LETTER PHI}1-4:', bg=self.main_color)
+        state_res_label.grid(in_=setup_label, row=5, column=0, sticky='w')
+        state_res_frame = Frame(frame2, bg=self.main_color)
+        state_res_frame.grid(in_=setup_label, row=5, column=1, columnspan=2, sticky='w')
+        self.state_resname = list()
+        for state in range(4):
+            resname = Entry(state_res_frame, width=4, highlightthickness=0, relief=GROOVE)
+            resname.grid(row=0, column=state)
+            resname.insert(0, 'qs%d' % (state + 1))
+            self.state_resname.append(resname)
+        self.state_resname[2].config(state=DISABLED)
+        self.state3_enabled.append(self.state_resname[2])
+        self.state_resname[3].config(state=DISABLED)
+        self.state4_enabled.append(self.state_resname[3])
 
         #Status frame
         status_label = LabelFrame(frame3, text='Status', bg=self.main_color)
